@@ -1,446 +1,261 @@
-import osmnx as ox
-import networkx as nx
+from flask import Flask, request, jsonify, render_template
 import geopandas as gpd
-import matplotlib.pyplot as plt
-from typing import List, Tuple, Dict, Optional
-import time
-import math
+import math, time, psutil, os, heapq
+from collections import deque, defaultdict
+
+app = Flask(__name__)
 
 
-class UBPathFinder:
+class RoadNetworkGraph:
     def __init__(self):
-        self.graph = None
-        self.area_name = "Ulaanbaatar, Mongolia"
+        self.nodes = {}
+        self.edges = defaultdict(list)
+        self.node_coords_to_id = {}
+        self.next_node_id = 0
 
-    def download_map_data(self):
-        """Улаанбаатар хотын замын сүлжээг татаж авч байрлуулах"""
-        print("Улаанбаатар хотын замын сүлжээг татаж авч байна...")
-
-        try:
-            # Улаанбаатар хотын замын сүлжээг татах
-            self.graph = ox.graph_from_place(self.area_name, network_type='drive')
-            print("✅ Замын сүлжээ амжилттай татагдлаа!")
-
-            # Графикийг энгийн болгох
-            self.graph = ox.utils_graph.get_undirected(self.graph)
-
-            # Замын уртыг тооцоолох
-            self.graph = ox.add_edge_lengths(self.graph)
-
-            print(f"📊 График мэдээлэл: {len(self.graph.nodes)} орой, {len(self.graph.edges)} ирмэг")
-
-        except Exception as e:
-            print(f"❌ Алдаа: {e}")
-            print("🔧 Интернэт холболтоо шалгана уу")
-
-    def find_nodes_near_location(self, lat: float, lon: float) -> Optional[int]:
-        """Өгөгдсөн координаттай ойролцоо оройг олох"""
-        if self.graph is None:
-            print("❌ График байхгүй байна")
-            return None
-
-        try:
-            # Координатад хамгийн ойрхон оройг олох
-            node_id = ox.distance.nearest_nodes(self.graph, lon, lat)
-            print(f"📍 Координат ({lat}, {lon}) -> Орой {node_id}")
+    def add_node(self, lon, lat):
+        if (lon, lat) not in self.node_coords_to_id:
+            node_id = self.next_node_id
+            self.nodes[node_id] = (lon, lat)
+            self.node_coords_to_id[(lon, lat)] = node_id
+            self.next_node_id += 1
             return node_id
-        except Exception as e:
-            print(f"❌ Орой олоход алдаа: {e}")
-            return None
+        return self.node_coords_to_id[(lon, lat)]
 
-    def bfs_shortest_path(self, start_node: int, end_node: int) -> Tuple[List[int], float, Dict]:
-        """BFS алгоритм ашиглан хамгийн богино замыг олох"""
-        print("🔄 BFS алгоритмаар замыг хайж байна...")
-        start_time = time.time()
-        stats = {'visited_nodes': 0, 'iterations': 0}
+    def add_edge(self, node1, node2, weight, road_data=None):
+        self.edges[node1].append((node2, weight, road_data or {}))
+        self.edges[node2].append((node1, weight, road_data or {}))
 
+
+def calculate_distance(c1, c2):
+    R = 6371
+    lon1, lat1 = c1
+    lon2, lat2 = c2
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+class RoadNetworkAnalyzer:
+    def __init__(self, shapefile_path):
         try:
-            # BFS ашиглан замыг олох
-            path = nx.shortest_path(self.graph, start_node, end_node, method='dijkstra')
-            stats['visited_nodes'] = len(path)
-
-            # Замын уртыг тооцоолох
-            path_length = self.calculate_path_length(path)
-
-            end_time = time.time()
-            execution_time = end_time - start_time
-            stats['execution_time'] = execution_time
-
-            print(f"✅ BFS: {execution_time:.4f} секунд, {len(path)} орой, {path_length:.1f} метр")
-
-            return path, path_length, stats
-
-        except nx.NetworkXNoPath:
-            print("❌ BFS: Зам олдсонгүй")
-            return [], float('inf'), stats
+            self.gdf = gpd.read_file(shapefile_path)
+            self.graph = RoadNetworkGraph()
+            self.build_graph()
+            print("Граф амжилттай бүтээгдлээ")
         except Exception as e:
-            print(f"❌ BFS алдаа: {e}")
-            return [], float('inf'), stats
+            print(f"Shapefile уншихад алдаа гарлаа: {e}")
+            # Жишээ өгөгдөл үүсгэх
+            self.graph = RoadNetworkGraph()
+            self._create_sample_data()
 
-    def dfs_path(self, start_node: int, end_node: int) -> Tuple[List[int], float, Dict]:
-        """DFS алгоритм ашиглан замыг олох"""
-        print("🔄 DFS алгоритмаар замыг хайж байна...")
-        start_time = time.time()
-        stats = {'visited_nodes': 0, 'iterations': 0}
+    def _create_sample_data(self):
+        """Жишээ өгөгдөл үүсгэх"""
+        print("Жишээ өгөгдөл үүсгэж байна...")
+        coords = [
+            (106.915, 47.920), (106.916, 47.921), (106.917, 47.919),
+            (106.918, 47.922), (106.919, 47.920), (106.920, 47.923)
+        ]
 
-        visited = set()
-        stack = [(start_node, [start_node])]
-        stats['iterations'] = 0
+        for i in range(len(coords)):
+            self.graph.add_node(*coords[i])
 
-        while stack:
-            stats['iterations'] += 1
-            current_node, path = stack.pop()
+        for i in range(len(coords) - 1):
+            dist = calculate_distance(coords[i], coords[i + 1])
+            self.graph.add_edge(i, i + 1, dist, {'name': f'Жишээ зам {i + 1}'})
 
-            if current_node == end_node:
-                # Замын уртыг тооцоолох
-                path_length = self.calculate_path_length(path)
-                stats['visited_nodes'] = len(visited)
+    def build_graph(self):
+        print("Граф боловсруулж байна...")
+        for _, road in self.gdf.iterrows():
+            if road.geometry.geom_type == 'LineString':
+                coords = list(road.geometry.coords)
+                for i in range(len(coords) - 1):
+                    node1 = self.graph.add_node(*coords[i])
+                    node2 = self.graph.add_node(*coords[i + 1])
+                    dist = calculate_distance(coords[i], coords[i + 1])
+                    road_data = {'name': road.get('name', 'unknown')}
+                    self.graph.add_edge(node1, node2, dist, road_data)
+        print(f"Граф үүссэн: {len(self.graph.nodes)} орой, {sum(len(v) for v in self.graph.edges.values())} ирмэг")
 
-                end_time = time.time()
-                execution_time = end_time - start_time
-                stats['execution_time'] = execution_time
+    def find_nearest_node(self, lon, lat):
+        best, min_d = None, float("inf")
+        for nid, (x, y) in self.graph.nodes.items():
+            d = calculate_distance((lon, lat), (x, y))
+            if d < min_d:
+                min_d, best = d, nid
+        return best
 
-                print(f"✅ DFS: {execution_time:.4f} секунд, {len(path)} орой, {path_length:.1f} метр")
-                return path, path_length, stats
-
-            if current_node not in visited:
-                visited.add(current_node)
-
-                # Хөрш оройнуудыг нэмэх
-                for neighbor in self.graph.neighbors(current_node):
-                    if neighbor not in visited:
-                        stack.append((neighbor, path + [neighbor]))
-
-        stats['visited_nodes'] = len(visited)
-        print("❌ DFS: Зам олдсонгүй")
-        return [], float('inf'), stats
-
-    def dijkstra_shortest_path(self, start_node: int, end_node: int) -> Tuple[List[int], float, Dict]:
-        """Dijkstra алгоритм ашиглан хамгийн богино замыг олох"""
-        print("🔄 Dijkstra алгоритмаар замыг хайж байна...")
-        start_time = time.time()
-        stats = {'visited_nodes': 0, 'iterations': 0}
-
+    def bfs(self, start, end):
         try:
-            # Dijkstra ашиглан хамгийн богино замыг олох
-            path = nx.shortest_path(self.graph, start_node, end_node, weight='length')
-            stats['visited_nodes'] = len(path)
+            s = self.find_nearest_node(*start)
+            e = self.find_nearest_node(*end)
 
-            # Замын уртыг тооцоолох
-            path_length = self.calculate_path_length(path)
+            if s is None or e is None:
+                return self._error('BFS', 'Эхлэх эсвэл төгсгөлийн цэг олдсонгүй')
 
-            end_time = time.time()
-            execution_time = end_time - start_time
-            stats['execution_time'] = execution_time
+            visited, queue = set([s]), deque([[s]])
+            t0, mem0 = time.time(), psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
 
-            print(f"✅ Dijkstra: {execution_time:.4f} секунд, {len(path)} орой, {path_length:.1f} метр")
-
-            return path, path_length, stats
-
-        except nx.NetworkXNoPath:
-            print("❌ Dijkstra: Зам олдсонгүй")
-            return [], float('inf'), stats
+            while queue:
+                path = queue.popleft()
+                node = path[-1]
+                if node == e:
+                    coords = [self.graph.nodes[n] for n in path]
+                    return self._result('BFS', coords, time.time() - t0, mem0)
+                for nb, _, _ in self.graph.edges[node]:
+                    if nb not in visited:
+                        visited.add(nb)
+                        queue.append(path + [nb])
+            return self._error('BFS', 'Зам олдсонгүй')
         except Exception as e:
-            print(f"❌ Dijkstra алдаа: {e}")
-            return [], float('inf'), stats
+            return self._error('BFS', f'Алдаа: {str(e)}')
 
-    def calculate_path_length(self, path: List[int]) -> float:
-        """Замын нийт уртыг тооцоолох"""
-        if len(path) < 2:
-            return 0
+    def dijkstra(self, start, end):
+        try:
+            s = self.find_nearest_node(*start)
+            e = self.find_nearest_node(*end)
 
-        total_length = 0
-        for i in range(len(path) - 1):
-            edge_data = self.graph.get_edge_data(path[i], path[i + 1])
-            if edge_data:
-                # Эхний ирмэгийн уртыг авах
-                first_edge = next(iter(edge_data.values()))
-                length = first_edge.get('length', 0)
-                total_length += length
+            if s is None or e is None:
+                return self._error('Dijkstra', 'Эхлэх эсвэл төгсгөлийн цэг олдсонгүй')
 
-        return total_length
+            dist = {n: float("inf") for n in self.graph.nodes}
+            prev = {}
+            dist[s] = 0
+            pq = [(0, s)]
+            t0, mem0 = time.time(), psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
 
-    def validate_path(self, path: List[int], start_node: int, end_node: int) -> bool:
-        """Олдсон замын зөв эсэхийг шалгах"""
-        if not path:
-            return False
+            while pq:
+                d, node = heapq.heappop(pq)
+                if node == e:
+                    path = []
+                    while node in prev:
+                        path.append(node)
+                        node = prev[node]
+                    path.append(s)
+                    path.reverse()
+                    coords = [self.graph.nodes[n] for n in path]
+                    return self._result('Dijkstra', coords, time.time() - t0, mem0)
 
-        # Эхлэл ба төгсгөл шалгах
-        if path[0] != start_node or path[-1] != end_node:
-            return False
+                for nb, w, _ in self.graph.edges[node]:
+                    nd = d + w
+                    if nd < dist[nb]:
+                        dist[nb] = nd
+                        prev[nb] = node
+                        heapq.heappush(pq, (nd, nb))
+            return self._error('Dijkstra', 'Зам олдсонгүй')
+        except Exception as e:
+            return self._error('Dijkstra', f'Алдаа: {str(e)}')
 
-        # Зам дахь бүх ирмэгүүд шалгах
-        for i in range(len(path) - 1):
-            if not self.graph.has_edge(path[i], path[i + 1]):
-                return False
+    def dfs(self, start, end):
+        try:
+            s = self.find_nearest_node(*start)
+            e = self.find_nearest_node(*end)
 
-        return True
+            if s is None or e is None:
+                return self._error('DFS', 'Эхлэх эсвэл төгсгөлийн цэг олдсонгүй')
 
-    def visualize_paths(self, start_node: int, end_node: int,
-                        bfs_path: List[int], dfs_path: List[int],
-                        dijkstra_path: List[int], bfs_stats: Dict,
-                        dfs_stats: Dict, dijkstra_stats: Dict):
-        """Гурван алгоритмын үр дүнг харьцуулан харуулах"""
-        if self.graph is None:
-            print("❌ График байхгүй байна")
-            return
+            visited = set()
+            stack = [(s, [s])]
+            t0, mem0 = time.time(), psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
 
-        # 4x4 хүснэгт үүсгэх
-        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-        fig.suptitle('Улаанбаатар хотын замын сүлжээ - Алгоритмын харьцуулалт', fontsize=16, fontweight='bold')
+            while stack:
+                node, path = stack.pop()
+                if node == e:
+                    coords = [self.graph.nodes[n] for n in path]
+                    return self._result('DFS', coords, time.time() - t0, mem0)
 
-        # Анхны замын сүлжээ
-        ox.plot_graph(self.graph, ax=axes[0, 0], node_size=0, edge_color='gray',
-                      edge_linewidth=0.3, show=False, close=False)
-        axes[0, 0].set_title('🗺️ Замын сүлжээний бүтэц', fontsize=12, fontweight='bold')
-        axes[0, 0].text(0.02, 0.98, f'Орой: {len(self.graph.nodes)}\nИрмэг: {len(self.graph.edges)}',
-                        transform=axes[0, 0].transAxes, verticalalignment='top',
-                        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+                if node not in visited:
+                    visited.add(node)
+                    for nb, _, _ in self.graph.edges[node]:
+                        if nb not in visited:
+                            stack.append((nb, path + [nb]))
 
-        # BFS замыг харуулах
-        if bfs_path and self.validate_path(bfs_path, start_node, end_node):
-            ox.plot_graph_route(self.graph, bfs_path, ax=axes[0, 1], route_color='red',
-                                route_linewidth=4, node_size=0, show=False, close=False)
-            bfs_length = self.calculate_path_length(bfs_path)
-            axes[0, 1].set_title(f'🔴 BFS Алгоритм\n{bfs_length:.1f} метр, {bfs_stats["execution_time"]:.3f} сек',
-                                 fontsize=12, fontweight='bold')
-            axes[0, 1].text(0.02, 0.98,
-                            f'Орой: {len(bfs_path)}\nЗай: {bfs_length:.0f}м\nЦаг: {bfs_stats["execution_time"]:.3f}с',
-                            transform=axes[0, 1].transAxes, verticalalignment='top',
-                            bbox=dict(boxstyle='round', facecolor='lightcoral', alpha=0.8))
-        else:
-            axes[0, 1].set_title('❌ BFS Алгоритм - Зам олдсонгүй', fontsize=12)
+            return self._error('DFS', 'Зам олдсонгүй')
+        except Exception as e:
+            return self._error('DFS', f'Алдаа: {str(e)}')
 
-        # DFS замыг харуулах
-        if dfs_path and self.validate_path(dfs_path, start_node, end_node):
-            ox.plot_graph_route(self.graph, dfs_path, ax=axes[1, 0], route_color='blue',
-                                route_linewidth=4, node_size=0, show=False, close=False)
-            dfs_length = self.calculate_path_length(dfs_path)
-            axes[1, 0].set_title(f'🔵 DFS Алгоритм\n{dfs_length:.1f} метр, {dfs_stats["execution_time"]:.3f} сек',
-                                 fontsize=12, fontweight='bold')
-            axes[1, 0].text(0.02, 0.98,
-                            f'Орой: {len(dfs_path)}\nЗай: {dfs_length:.0f}м\nЦаг: {dfs_stats["execution_time"]:.3f}с',
-                            transform=axes[1, 0].transAxes, verticalalignment='top',
-                            bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
-        else:
-            axes[1, 0].set_title('❌ DFS Алгоритм - Зам олдсонгүй', fontsize=12)
+    def _result(self, algo, path, t, mem0):
+        mem1 = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
+        dist = sum(calculate_distance(path[i], path[i + 1]) for i in range(len(path) - 1))
+        return {
+            'algorithm': algo,
+            'path': path,
+            'distance': dist,
+            'execution_time': t,
+            'memory_used': mem1 - mem0,
+            'status': 'success'
+        }
 
-        # Dijkstra замыг харуулах
-        if dijkstra_path and self.validate_path(dijkstra_path, start_node, end_node):
-            ox.plot_graph_route(self.graph, dijkstra_path, ax=axes[1, 1], route_color='green',
-                                route_linewidth=4, node_size=0, show=False, close=False)
-            dijkstra_length = self.calculate_path_length(dijkstra_path)
-            axes[1, 1].set_title(
-                f'🟢 Dijkstra Алгоритм\n{dijkstra_length:.1f} метр, {dijkstra_stats["execution_time"]:.3f} сек',
-                fontsize=12, fontweight='bold')
-            axes[1, 1].text(0.02, 0.98,
-                            f'Орой: {len(dijkstra_path)}\nЗай: {dijkstra_length:.0f}м\nЦаг: {dijkstra_stats["execution_time"]:.3f}с',
-                            transform=axes[1, 1].transAxes, verticalalignment='top',
-                            bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.8))
-        else:
-            axes[1, 1].set_title('❌ Dijkstra Алгоритм - Зам олдсонгүй', fontsize=12)
-
-        plt.tight_layout()
-        plt.show()
-
-    def print_comparison_table(self, bfs_stats: Dict, dfs_stats: Dict, dijkstra_stats: Dict,
-                               bfs_length: float, dfs_length: float, dijkstra_length: float):
-        """Харьцуулалтын хүснэгт хэвлэх"""
-        print("\n" + "=" * 80)
-        print("📊 АЛГОРИТМЫН ХАРЬЦУУЛАЛТЫН ХҮСНЭГТ")
-        print("=" * 80)
-        print(f"{'Алгоритм':<12} {'Замны урт (м)':<15} {'Гүйцэтгэл (сек)':<15} {'Давуу тал':<30}")
-        print("-" * 80)
-
-        # BFS мэдээлэл
-        bfs_advantage = "• Бүх боломжит зам • Гаранттай шийдэл"
-        print(f"{'BFS':<12} {bfs_length:<15.1f} {bfs_stats['execution_time']:<15.4f} {bfs_advantage:<30}")
-
-        # DFS мэдээлэл
-        dfs_advantage = "• Гүнзгий хайлт • Санах ой бага"
-        print(f"{'DFS':<12} {dfs_length:<15.1f} {dfs_stats['execution_time']:<15.4f} {dfs_advantage:<30}")
-
-        # Dijkstra мэдээлэл
-        dijkstra_advantage = "• Хамгийн богино зам • Жинтэй график"
-        print(
-            f"{'Dijkstra':<12} {dijkstra_length:<15.1f} {dijkstra_stats['execution_time']:<15.4f} {dijkstra_advantage:<30}")
-
-        print("-" * 80)
-
-        # Хамгийн богино замыг тодруулах
-        min_length = min(bfs_length, dfs_length, dijkstra_length)
-        if min_length != float('inf'):
-            if dijkstra_length == min_length:
-                print("🎉 Dijkstra алгоритм хамгийн богино замыг оллоо!")
-            elif bfs_length == min_length:
-                print("🎉 BFS алгоритм хамгийн богино замыг оллоо!")
-            else:
-                print("🎉 DFS алгоритм хамгийн богино замыг оллоо!")
-
-        # Хамгийн хурдан алгоритмыг тодруулах
-        times = [bfs_stats['execution_time'], dfs_stats['execution_time'], dijkstra_stats['execution_time']]
-        min_time = min(times)
-        algorithms = ['BFS', 'DFS', 'Dijkstra']
-        fastest_algo = algorithms[times.index(min_time)]
-        print(f"⚡ {fastest_algo} алгоритм хамгийн хурдан ажиллалаа: {min_time:.4f} секунд")
-
-    def test_algorithm_correctness(self, start_node: int, end_node: int):
-        """Алгоритмуудын зөв эсэхийг шалгах тест"""
-        print("\n" + "🔍 АЛГОРИТМЫН ЗӨВ БАЙДЛЫН ШАЛГАЛТ")
-        print("-" * 50)
-
-        # Бүх алгоритмаар замыг олох
-        bfs_path, bfs_length, _ = self.bfs_shortest_path(start_node, end_node)
-        dfs_path, dfs_length, _ = self.dfs_path(start_node, end_node)
-        dijkstra_path, dijkstra_length, _ = self.dijkstra_shortest_path(start_node, end_node)
-
-        # Шалгуурууд
-        tests_passed = 0
-        total_tests = 0
-
-        # Тест 1: Зам эхлэх цэгээс эхэлсэн эсэх
-        total_tests += 1
-        if bfs_path and bfs_path[0] == start_node:
-            tests_passed += 1
-            print("✅ BFS: Зам зөв эхлэх цэгээс эхэлж байна")
-        else:
-            print("❌ BFS: Зам буруу эхлэх цэгтэй")
-
-        total_tests += 1
-        if dfs_path and dfs_path[0] == start_node:
-            tests_passed += 1
-            print("✅ DFS: Зам зөв эхлэх цэгээс эхэлж байна")
-        else:
-            print("❌ DFS: Зам буруу эхлэх цэгтэй")
-
-        total_tests += 1
-        if dijkstra_path and dijkstra_path[0] == start_node:
-            tests_passed += 1
-            print("✅ Dijkstra: Зам зөв эхлэх цэгээс эхэлж байна")
-        else:
-            print("❌ Dijkstra: Зам буруу эхлэх цэгтэй")
-
-        # Тест 2: Зам дуусах цэгт төгссөн эсэх
-        total_tests += 1
-        if bfs_path and bfs_path[-1] == end_node:
-            tests_passed += 1
-            print("✅ BFS: Зам зөв дуусах цэгт төгссөн")
-        else:
-            print("❌ BFS: Зам буруу дуусах цэгтэй")
-
-        total_tests += 1
-        if dfs_path and dfs_path[-1] == end_node:
-            tests_passed += 1
-            print("✅ DFS: Зам зөв дуусах цэгт төгссөн")
-        else:
-            print("❌ DFS: Зам буруу дуусах цэгтэй")
-
-        total_tests += 1
-        if dijkstra_path and dijkstra_path[-1] == end_node:
-            tests_passed += 1
-            print("✅ Dijkstra: Зам зөв дуусах цэгт төгссөн")
-        else:
-            print("❌ Dijkstra: Зам буруу дуусах цэгтэй")
-
-        # Тест 3: Зам дахь бүх ирмэгүүд графанд байгаа эсэх
-        total_tests += 1
-        if self.validate_path(bfs_path, start_node, end_node):
-            tests_passed += 1
-            print("✅ BFS: Зам дахь бүх ирмэгүүд зөв")
-        else:
-            print("❌ BFS: Зам дахь зарим ирмэг буруу")
-
-        total_tests += 1
-        if self.validate_path(dfs_path, start_node, end_node):
-            tests_passed += 1
-            print("✅ DFS: Зам дахь бүх ирмэгүүд зөв")
-        else:
-            print("❌ DFS: Зам дахь зарим ирмэг буруу")
-
-        total_tests += 1
-        if self.validate_path(dijkstra_path, start_node, end_node):
-            tests_passed += 1
-            print("✅ Dijkstra: Зам дахь бүх ирмэгүүд зөв")
-        else:
-            print("❌ Dijkstra: Зам дахь зарим ирмэг буруу")
-
-        print(f"\n📈 Шалгуурын үр дүн: {tests_passed}/{total_tests} амжилттай")
-
-        return tests_passed == total_tests
-
-    def compare_algorithms(self, start_lat: float, start_lon: float,
-                           end_lat: float, end_lon: float):
-        """Гурван алгоритмыг харьцуулах"""
-        print("🚀 Улаанбаатар хотын замын сүлжээнд алгоритмуудыг харьцуулж байна...")
-
-        # Эхлэх ба дуусах цэгүүдийн ойролцоох оройг олох
-        start_node = self.find_nodes_near_location(start_lat, start_lon)
-        end_node = self.find_nodes_near_location(end_lat, end_lon)
-
-        if start_node is None or end_node is None:
-            print("❌ Эхлэх эсвэл дуусах цэг олдсонгүй")
-            return
-
-        print(f"📍 Эхлэх цэг: {start_node}, Дуусах цэг: {end_node}")
-
-        # Алгоритмуудын зөв эсэхийг шалгах
-        correctness_test = self.test_algorithm_correctness(start_node, end_node)
-
-        if not correctness_test:
-            print("⚠️  Алгоритмуудын зөв байдлын шалгаралт амжилтгүй болсон тул үр дүнг харуулахгүй")
-            return
-
-        # Гурван алгоритмаар замыг олох
-        bfs_path, bfs_length, bfs_stats = self.bfs_shortest_path(start_node, end_node)
-        dfs_path, dfs_length, dfs_stats = self.dfs_path(start_node, end_node)
-        dijkstra_path, dijkstra_length, dijkstra_stats = self.dijkstra_shortest_path(start_node, end_node)
-
-        # Үр дүнг харьцуулах хүснэгт
-        self.print_comparison_table(bfs_stats, dfs_stats, dijkstra_stats,
-                                    bfs_length, dfs_length, dijkstra_length)
-
-        # Дүрслэх
-        self.visualize_paths(start_node, end_node, bfs_path, dfs_path,
-                             dijkstra_path, bfs_stats, dfs_stats, dijkstra_stats)
+    def _error(self, algo, message='Зам олдсонгүй'):
+        return {
+            'algorithm': algo,
+            'error': message,
+            'status': 'error'
+        }
 
 
-def main():
-    """Үндсэн програм"""
-    print("=" * 60)
-    print("🏙️  Улаанбаатар хотын замын сүлжээний алгоритмын харьцуулалт")
-    print("=" * 60)
+shapefile_path = "data/gis_osm_roads_free_1.shp"
+if not os.path.exists(shapefile_path):
+    print(f"Анхаар: {shapefile_path} файл олдсонгүй. Жишээ өгөгдөл ашиглаж байна.")
 
-    path_finder = UBPathFinder()
+analyzer = RoadNetworkAnalyzer(shapefile_path)
 
-    # Замын сүлжээг татах
-    path_finder.download_map_data()
 
-    if path_finder.graph is None:
-        print("❌ Замын сүлжээг татаж авахад алдаа гарлаа. Дахин оролдоно уу.")
-        return
+@app.route("/")
+def index():
+    return render_template("index.html")
 
-    # Жишээ координатууд (Улаанбаатар хотын өөр өөр цэгүүд)
-    print("\n🎯 Жишээ замын чиглэл:")
 
-    # Сонголт 1: Төв цэгүүд
-    print("1. Сүхбаатарын талбай -> Чингис хаан олон улсын нисэх онгоцны буудал")
-    start_lat, start_lon = 47.9185, 106.9177  # Сүхбаатарын талбай
-    end_lat, end_lon = 47.6467, 106.8197  # Нисэх онгоцны буудал
+@app.route("/api/bfs", methods=["POST"])
+def bfs_api():
+    try:
+        data = request.get_json()
+        if not data or 'start' not in data or 'end' not in data:
+            return jsonify({'error': 'Эхлэх болон төгсгөлийн цэг шаардлагатай'}), 400
+        res = analyzer.bfs(data["start"], data["end"])
+        return jsonify(res)
+    except Exception as e:
+        return jsonify({'error': f'Алдаа: {str(e)}'}), 500
 
-    # Сонголт 2: Хан-Уул дүүрэг -> Бага тойруу
-    # start_lat, start_lon = 47.8900, 106.8900
-    # end_lat, end_lon = 47.9300, 106.9300
 
-    print(f"📍 Эхлэх: ({start_lat}, {start_lon})")
-    print(f"🎯 Дуусах: ({end_lat}, {end_lon})")
+@app.route("/api/dijkstra", methods=["POST"])
+def dijkstra_api():
+    try:
+        data = request.get_json()
+        if not data or 'start' not in data or 'end' not in data:
+            return jsonify({'error': 'Эхлэх болон төгсгөлийн цэг шаардлагатай'}), 400
+        res = analyzer.dijkstra(data["start"], data["end"])
+        return jsonify(res)
+    except Exception as e:
+        return jsonify({'error': f'Алдаа: {str(e)}'}), 500
 
-    # Алгоритмуудыг харьцуулах
-    path_finder.compare_algorithms(start_lat, start_lon, end_lat, end_lon)
 
-    print("\n" + "=" * 60)
-    print("✅ Програм амжилттай дууслаа!")
-    print("=" * 60)
+@app.route("/api/dfs", methods=["POST"])
+def dfs_api():
+    try:
+        data = request.get_json()
+        if not data or 'start' not in data or 'end' not in data:
+            return jsonify({'error': 'Эхлэх болон төгсгөлийн цэг шаардлагатай'}), 400
+        res = analyzer.dfs(data["start"], data["end"])
+        return jsonify(res)
+    except Exception as e:
+        return jsonify({'error': f'Алдаа: {str(e)}'}), 500
+
+
+@app.route("/api/info")
+def info():
+    return jsonify({
+        "nodes": len(analyzer.graph.nodes),
+        "edges": sum(len(v) for v in analyzer.graph.edges.values()),
+        "status": "active"
+    })
 
 
 if __name__ == "__main__":
-    main()
+    template_dir = os.path.join(os.path.dirname(__file__), 'templates')
+    if not os.path.exists(template_dir):
+        os.makedirs(template_dir)
+        print("Templates хавтас үүсгэгдлээ")
+
+    app.run(debug=True, port=5000)
