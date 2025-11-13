@@ -6,30 +6,131 @@
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <style>
-    body { font-family: Arial, sans-serif; padding: 12px; }
-    #map { height: 640px; width: 100%; border: 1px solid #ccc; }
-    .controls { margin: 8px 0; }
+    body {
+      font-family: Arial, sans-serif;
+      padding: 12px;
+      margin: 0;
+      background-color: #f5f5f5;
+      color: #333;
+    }
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      background-color: white;
+      padding: 20px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+      border-radius: 4px;
+    }
+    h2 {
+      margin-top: 0;
+      font-weight: 600;
+      font-size: 1.5rem;
+      color: #222;
+    }
+    #map {
+      height: 640px;
+      width: 100%;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+    }
+    .controls {
+      margin: 16px 0;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    label {
+      font-weight: 600;
+      color: #444;
+    }
+    select {
+      padding: 8px 12px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      background-color: white;
+      color: #333;
+      font-size: 14px;
+    }
+    button {
+      padding: 8px 16px;
+      background-color: #333;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+      transition: background-color 0.2s;
+    }
+    button:hover {
+      background-color: #555;
+    }
+    .legend {
+      margin-top: 12px;
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 14px;
+    }
+    .legend-color {
+      width: 20px;
+      height: 4px;
+      border-radius: 2px;
+    }
+    .bfs-color {
+      background-color: #3498db;
+    }
+    .dfs-color {
+      background-color: #e74c3c;
+    }
+    .dijkstra-color {
+      background-color: #2ecc71;
+    }
   </style>
 </head>
 <body>
-  <h2>UB Route Finder — Click start and goal on map</h2>
-  <div class="controls">
-    <label for="algorithm">Algorithm:</label>
-    <select id="algorithm">
-      <option value="all">All (BFS, DFS, Dijkstra)</option>
-      <option value="bfs">BFS (shortest by edges)</option>
-      <option value="dfs">DFS (one path)</option>
-      <option value="dijkstra">Dijkstra (shortest by length)</option>
-    </select>
-    <button id="clearBtn">Clear Markers</button>
-  </div>
+  <div class="container">
+    <h2>Алгоритмаа сонгоод эхлэх цэг болон төгсөх цэгийг сонгоорой!</h2>
 
-  <div id="map"></div>
+    <div class="controls">
+      <label for="algorithm">Алгоритм:</label>
+      <select id="algorithm">
+        <option value="all">Бүгд (BFS, DFS, Dijkstra)</option>
+        <option value="bfs">BFS</option>
+        <option value="dfs">DFS</option>
+        <option value="dijkstra">Dijkstra</option>
+      </select>
+      <button id="clearBtn">Aрилгах</button>
+    </div>
+
+    <div id="map"></div>
+
+    <div class="legend">
+      <div class="legend-item">
+        <div class="legend-color bfs-color"></div>
+        <span>BFS</span>
+      </div>
+      <div class="legend-item">
+        <div class="legend-color dfs-color"></div>
+        <span>DFS</span>
+      </div>
+      <div class="legend-item">
+        <div class="legend-color dijkstra-color"></div>
+        <span>Dijkstra</span>
+      </div>
+    </div>
+  </div>
 
   <script>
     const map = L.map('map').setView([47.9189, 106.917], 12);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 19, attribution: '© OpenStreetMap'
+      maxZoom: 19,
+      attribution: '© OpenStreetMap'
     }).addTo(map);
 
     let startMarker = null, goalMarker = null;
@@ -49,11 +150,23 @@
 
     map.on('click', function(e){
       if (!startMarker) {
-        startMarker = L.marker(e.latlng, {title:'Start', icon: L.icon({iconUrl: 'https://maps.google.com/mapfiles/ms/icons/green-dot.png'})}).addTo(map);
+        startMarker = L.marker(e.latlng, {
+          title:'Эхлэл',
+          icon: L.icon({
+            iconUrl: 'https://maps.google.com/mapfiles/ms/icons/green-dot.png'
+          })
+        }).addTo(map);
         return;
       }
+
       if (!goalMarker) {
-        goalMarker = L.marker(e.latlng, {title:'Goal', icon: L.icon({iconUrl: 'https://maps.google.com/mapfiles/ms/icons/red-dot.png'})}).addTo(map);
+        goalMarker = L.marker(e.latlng, {
+          title:'Зорилго',
+          icon: L.icon({
+            iconUrl: 'https://maps.google.com/mapfiles/ms/icons/red-dot.png'
+          })
+        }).addTo(map);
+
         // got both -> call server
         const alg = document.getElementById('algorithm').value;
         fetch('/find_json', {
@@ -69,28 +182,51 @@
         }).then(r => r.json()).then(data => {
           clearPolylines();
           const paths = data.paths;
+
           if (paths.bfs) {
-            const p = L.polyline(paths.bfs, {color:'blue', weight:4}).addTo(map);
+            const p = L.polyline(paths.bfs, {
+              color: '#3498db',
+              weight: 4,
+              opacity: 0.8
+            }).addTo(map);
             polyLayers.push(p);
           }
+
           if (paths.dfs) {
-            const p = L.polyline(paths.dfs, {color:'orange', weight:4, dashArray:'6 6'}).addTo(map);
+            const p = L.polyline(paths.dfs, {
+              color: '#e74c3c',
+              weight: 4,
+              opacity: 0.8,
+              dashArray: '6, 6'
+            }).addTo(map);
             polyLayers.push(p);
           }
+
           if (paths.dijkstra) {
-            const p = L.polyline(paths.dijkstra, {color:'purple', weight:4}).addTo(map);
+            const p = L.polyline(paths.dijkstra, {
+              color: '#2ecc71',
+              weight: 4,
+              opacity: 0.8
+            }).addTo(map);
             polyLayers.push(p);
           }
-        }).catch(err=>{
-          alert("Error: " + err);
+        }).catch(err => {
+          alert("Алдаа гарлаа: " + err);
         });
         return;
       }
-      // if both exist, clicking again resets
+
+      // both exist -> reset start to new click
       if (startMarker && goalMarker){
-        map.removeLayer(startMarker); map.removeLayer(goalMarker);
+        map.removeLayer(startMarker);
+        map.removeLayer(goalMarker);
         clearPolylines();
-        startMarker = L.marker(e.latlng, {title:'Start', icon: L.icon({iconUrl: 'https://maps.google.com/mapfiles/ms/icons/green-dot.png'})}).addTo(map);
+        startMarker = L.marker(e.latlng, {
+          title:'Эхлэл',
+          icon: L.icon({
+            iconUrl: 'https://maps.google.com/mapfiles/ms/icons/green-dot.png'
+          })
+        }).addTo(map);
         goalMarker = null;
       }
     });
