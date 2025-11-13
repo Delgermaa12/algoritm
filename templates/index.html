@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Улаанбаатар хотын замын граф</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css">
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <style>
+    #map { height: 100vh; width: 100vw; }
+    #controls {
+      position: absolute;
+      top: 10px; left: 10px;
+      background: white;
+      padding: 10px;
+      border-radius: 8px;
+      box-shadow: 0 0 10px rgba(0,0,0,0.2);
+      font-family: sans-serif;
+      z-index: 1000;
+    }
+    button { margin-top: 5px; width: 100%; }
+  </style>
+</head>
+<body>
+  <div id="controls">
+    <h3>Зам хайх</h3>
+    <select id="algorithm">
+      <option value="bfs">BFS</option>
+      <option value="dfs">DFS</option>
+      <option value="dijkstra">Dijkstra</option>
+    </select>
+    <button id="findPathBtn">Зам олох</button>
+    <button id="compareBtn">3 алгоритмыг харьцуулах</button>
+  </div>
+
+  <div id="map"></div>
+
+  <script>
+    const map = L.map('map').setView([47.9214, 106.9055], 13);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '© OpenStreetMap'
+    }).addTo(map);
+
+    let startMarker = null;
+    let endMarker = null;
+    let pathLayers = [];
+
+    const blueIcon = new L.Icon({
+      iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-blue.png',
+      shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png',
+      iconSize: [25, 41],
+      iconAnchor: [12, 41],
+      popupAnchor: [1, -34],
+      shadowSize: [41, 41]
+    });
+
+    const redIcon = new L.Icon({
+      iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png',
+      shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png',
+      iconSize: [25, 41],
+      iconAnchor: [12, 41],
+      popupAnchor: [1, -34],
+      shadowSize: [41, 41]
+    });
+
+    map.on('click', function(e) {
+      if (!startMarker) {
+        startMarker = L.marker(e.latlng, {icon: blueIcon}).addTo(map).bindPopup("Эхлэх цэг").openPopup();
+      } else if (!endMarker) {
+        endMarker = L.marker(e.latlng, {icon: redIcon}).addTo(map).bindPopup("Дуусах цэг").openPopup();
+      } else {
+        map.removeLayer(startMarker);
+        map.removeLayer(endMarker);
+        pathLayers.forEach(pl => map.removeLayer(pl));
+        pathLayers = [];
+        startMarker = L.marker(e.latlng, {icon: blueIcon}).addTo(map).bindPopup("Эхлэх цэг").openPopup();
+        endMarker = null;
+      }
+    });
+
+    document.getElementById('findPathBtn').addEventListener('click', async function() {
+      if (!startMarker || !endMarker) {
+        alert("Эхлэх ба дуусах цэгээ сонгоно уу!");
+        return;
+      }
+
+      const algorithm = document.getElementById('algorithm').value;
+      const start = [startMarker.getLatLng().lat, startMarker.getLatLng().lng];
+      const end = [endMarker.getLatLng().lat, endMarker.getLatLng().lng];
+
+      const res = await fetch(`/api/find_path?start=${start}&end=${end}&algorithm=${algorithm}`);
+      const data = await res.json();
+
+      if (data.error) {
+        alert(data.error);
+        return;
+      }
+
+      pathLayers.forEach(pl => map.removeLayer(pl));
+      pathLayers = [];
+
+      const coords = data.path.map(p => [p[0], p[1]]);
+      const color = algorithm === 'bfs' ? 'green' : algorithm === 'dfs' ? 'red' : 'magenta';
+      const polyline = L.polyline(coords, {color: color, weight: 6, opacity: 0.8}).addTo(map);
+      pathLayers.push(polyline);
+      map.fitBounds(polyline.getBounds());
+    });
+
+    document.getElementById('compareBtn').addEventListener('click', async function() {
+      if (!startMarker || !endMarker) {
+        alert("Эхлэх ба дуусах цэгээ сонгоно уу!");
+        return;
+      }
+
+      const start = [startMarker.getLatLng().lat, startMarker.getLatLng().lng];
+      const end = [endMarker.getLatLng().lat, endMarker.getLatLng().lng];
+
+      const res = await fetch(`/api/compare_algorithms?start=${start}&end=${end}`);
+      const data = await res.json();
+
+      pathLayers.forEach(pl => map.removeLayer(pl));
+      pathLayers = [];
+
+      for (const algo in data) {
+        if (data[algo].path) {
+          const coords = data[algo].path.map(p => [p[0], p[1]]);
+          const color = algo === 'bfs' ? 'green' : algo === 'dfs' ? 'red' : 'magenta';
+          const polyline = L.polyline(coords, {color: color, weight: 5, opacity: 0.7}).addTo(map);
+          pathLayers.push(polyline);
+        }
+      }
+    });
+  </script>
+</body>
+</html>
