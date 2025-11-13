@@ -1,261 +1,222 @@
-from flask import Flask, request, jsonify, render_template
+# app.py
+from flask import Flask, render_template, request, jsonify
 import geopandas as gpd
-import math, time, psutil, os, heapq
-from collections import deque, defaultdict
+from shapely.geometry import LineString, box
+from shapely.ops import unary_union
+import heapq
+from collections import deque
+import os
+import math
+from scipy.spatial import cKDTree
+import threading
 
 app = Flask(__name__)
 
+SHAPE_PATH = "data/gis_osm_roads_free_1.shp"
+UB_BBOX = {
+    "minx": 106.75, "miny": 47.75,
+    "maxx": 107.05, "maxy": 47.98
+}
+PROJECTED_CRS = "EPSG:32647"
+GEOGRAPHIC_CRS = "EPSG:4326"
 
-class RoadNetworkGraph:
-    def __init__(self):
-        self.nodes = {}
-        self.edges = defaultdict(list)
-        self.node_coords_to_id = {}
-        self.next_node_id = 0
+GRAPH = None
+NODE_LIST = None
+KD_TREE = None
+NODE_INDEX = None
+GRAPH_LOCK = threading.Lock()
 
-    def add_node(self, lon, lat):
-        if (lon, lat) not in self.node_coords_to_id:
-            node_id = self.next_node_id
-            self.nodes[node_id] = (lon, lat)
-            self.node_coords_to_id[(lon, lat)] = node_id
-            self.next_node_id += 1
-            return node_id
-        return self.node_coords_to_id[(lon, lat)]
+def build_graph_once():
+    global GRAPH, NODE_LIST, KD_TREE, NODE_INDEX
+    with GRAPH_LOCK:
+        if GRAPH is not None:
+            return
 
-    def add_edge(self, node1, node2, weight, road_data=None):
-        self.edges[node1].append((node2, weight, road_data or {}))
-        self.edges[node2].append((node1, weight, road_data or {}))
+        if not os.path.exists(SHAPE_PATH):
+            raise FileNotFoundError(f"{SHAPE_PATH} not found. Place Geofabrik roads.shp in data/")
 
+        print("Loading shapefile...")
+        gdf = gpd.read_file(SHAPE_PATH)
 
-def calculate_distance(c1, c2):
-    R = 6371
-    lon1, lat1 = c1
-    lon2, lat2 = c2
-    dlat = math.radians(lat2 - lat1)
-    dlon = math.radians(lon2 - lon1)
-    a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
-    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+        gdf = gdf[gdf.geometry.type.isin(["LineString", "MultiLineString"])].copy()
 
-
-class RoadNetworkAnalyzer:
-    def __init__(self, shapefile_path):
+        bbox_geom = box(UB_BBOX["minx"], UB_BBOX["miny"], UB_BBOX["maxx"], UB_BBOX["maxy"])
         try:
-            self.gdf = gpd.read_file(shapefile_path)
-            self.graph = RoadNetworkGraph()
-            self.build_graph()
-            print("Граф амжилттай бүтээгдлээ")
-        except Exception as e:
-            print(f"Shapefile уншихад алдаа гарлаа: {e}")
-            # Жишээ өгөгдөл үүсгэх
-            self.graph = RoadNetworkGraph()
-            self._create_sample_data()
+            if gdf.crs is None:
+                gdf.set_crs(GEOGRAPHIC_CRS, inplace=True)
+            if gdf.crs.to_epsg() != 4326:
+                gdf = gdf.to_crs(GEOGRAPHIC_CRS)
+        except Exception:
+            pass
 
-    def _create_sample_data(self):
-        """Жишээ өгөгдөл үүсгэх"""
-        print("Жишээ өгөгдөл үүсгэж байна...")
-        coords = [
-            (106.915, 47.920), (106.916, 47.921), (106.917, 47.919),
-            (106.918, 47.922), (106.919, 47.920), (106.920, 47.923)
-        ]
+        gdf = gdf[gdf.intersects(bbox_geom)]
+        if len(gdf) == 0:
+            raise RuntimeError("No road features found inside UB bounding box. Check SHAPE_PATH and UB_BBOX.")
 
-        for i in range(len(coords)):
-            self.graph.add_node(*coords[i])
+        print(f"Features after clipping: {len(gdf)}")
 
-        for i in range(len(coords) - 1):
-            dist = calculate_distance(coords[i], coords[i + 1])
-            self.graph.add_edge(i, i + 1, dist, {'name': f'Жишээ зам {i + 1}'})
+        gdf_proj = gdf.to_crs(PROJECTED_CRS)
 
-    def build_graph(self):
-        print("Граф боловсруулж байна...")
-        for _, road in self.gdf.iterrows():
-            if road.geometry.geom_type == 'LineString':
-                coords = list(road.geometry.coords)
-                for i in range(len(coords) - 1):
-                    node1 = self.graph.add_node(*coords[i])
-                    node2 = self.graph.add_node(*coords[i + 1])
-                    dist = calculate_distance(coords[i], coords[i + 1])
-                    road_data = {'name': road.get('name', 'unknown')}
-                    self.graph.add_edge(node1, node2, dist, road_data)
-        print(f"Граф үүссэн: {len(self.graph.nodes)} орой, {sum(len(v) for v in self.graph.edges.values())} ирмэг")
+        adj = {}
+        def add_edge(a, b, w):
+            if a == b:
+                return
+            if b not in adj.setdefault(a, {} ) or adj[a][b] > w:
+                adj[a][b] = w
+                adj.setdefault(b, {})
+                adj[b][a] = w
 
-    def find_nearest_node(self, lon, lat):
-        best, min_d = None, float("inf")
-        for nid, (x, y) in self.graph.nodes.items():
-            d = calculate_distance((lon, lat), (x, y))
-            if d < min_d:
-                min_d, best = d, nid
-        return best
+        for geom_orig, geom_proj in zip(gdf.geometry, gdf_proj.geometry):
+            if geom_orig is None or geom_proj is None:
+                continue
+            parts_orig = [geom_orig] if geom_orig.geom_type == "LineString" else list(geom_orig)
+            parts_proj = [geom_proj] if geom_proj.geom_type == "LineString" else list(geom_proj)
+            for p_orig, p_proj in zip(parts_orig, parts_proj):
+                coords_orig = list(p_orig.coords)
+                coords_proj = list(p_proj.coords)
+                for i in range(len(coords_orig)-1):
+                    a_lonlat = (coords_orig[i][0], coords_orig[i][1])
+                    b_lonlat = (coords_orig[i+1][0], coords_orig[i+1][1])
+                    # Compute metric length using projected segment
+                    seg = LineString([coords_proj[i], coords_proj[i+1]])
+                    w = seg.length  # in meters (projected CRS)
+                    add_edge(a_lonlat, b_lonlat, w)
 
-    def bfs(self, start, end):
-        try:
-            s = self.find_nearest_node(*start)
-            e = self.find_nearest_node(*end)
+        nodes = list(adj.keys())
+        if len(nodes) == 0:
+            raise RuntimeError("Graph has 0 nodes after building - check shapefile and bbox.")
+        coords = [(n[0], n[1]) for n in nodes]
 
-            if s is None or e is None:
-                return self._error('BFS', 'Эхлэх эсвэл төгсгөлийн цэг олдсонгүй')
+        tree = cKDTree(coords)
+        index_map = { nodes[i]: i for i in range(len(nodes)) }
 
-            visited, queue = set([s]), deque([[s]])
-            t0, mem0 = time.time(), psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
+        GRAPH = adj
+        NODE_LIST = nodes
+        KD_TREE = tree
+        NODE_INDEX = index_map
 
-            while queue:
-                path = queue.popleft()
-                node = path[-1]
-                if node == e:
-                    coords = [self.graph.nodes[n] for n in path]
-                    return self._result('BFS', coords, time.time() - t0, mem0)
-                for nb, _, _ in self.graph.edges[node]:
-                    if nb not in visited:
-                        visited.add(nb)
-                        queue.append(path + [nb])
-            return self._error('BFS', 'Зам олдсонгүй')
-        except Exception as e:
-            return self._error('BFS', f'Алдаа: {str(e)}')
+        print(f"Graph built: nodes={len(nodes)}")
 
-    def dijkstra(self, start, end):
-        try:
-            s = self.find_nearest_node(*start)
-            e = self.find_nearest_node(*end)
+def nearest_node(point):
+    global NODE_LIST, KD_TREE
+    if KD_TREE is None:
+        build_graph_once()
+    dist, idx = KD_TREE.query([point[0], point[1]], k=1)
+    return NODE_LIST[int(idx)]
 
-            if s is None or e is None:
-                return self._error('Dijkstra', 'Эхлэх эсвэл төгсгөлийн цэг олдсонгүй')
+def bfs(start, goal):
+    adj = GRAPH
+    q = deque([start])
+    parent = {start: None}
+    while q:
+        v = q.popleft()
+        if v == goal:
+            break
+        for nb in adj.get(v, {}):
+            if nb not in parent:
+                parent[nb] = v
+                q.append(nb)
+    if goal not in parent:
+        return None
+    path = []
+    cur = goal
+    while cur is not None:
+        path.append(cur)
+        cur = parent[cur]
+    path.reverse()
+    return path
 
-            dist = {n: float("inf") for n in self.graph.nodes}
-            prev = {}
-            dist[s] = 0
-            pq = [(0, s)]
-            t0, mem0 = time.time(), psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
+def dfs(start, goal):
+    adj = GRAPH
+    stack = [start]
+    parent = {start: None}
+    visited = set([start])
+    while stack:
+        v = stack.pop()
+        if v == goal:
+            break
+        for nb in adj.get(v, {}):
+            if nb not in visited:
+                visited.add(nb)
+                parent[nb] = v
+                stack.append(nb)
+    if goal not in parent:
+        return None
+    path = []
+    cur = goal
+    while cur is not None:
+        path.append(cur)
+        cur = parent[cur]
+    path.reverse()
+    return path
 
-            while pq:
-                d, node = heapq.heappop(pq)
-                if node == e:
-                    path = []
-                    while node in prev:
-                        path.append(node)
-                        node = prev[node]
-                    path.append(s)
-                    path.reverse()
-                    coords = [self.graph.nodes[n] for n in path]
-                    return self._result('Dijkstra', coords, time.time() - t0, mem0)
+def dijkstra(start, goal):
+    adj = GRAPH
+    pq = [(0, start)]
+    dist = {start: 0}
+    parent = {start: None}
+    while pq:
+        d, v = heapq.heappop(pq)
+        if v == goal:
+            break
+        if d > dist.get(v, float('inf')):
+            continue
+        for nb, w in adj.get(v, {}).items():
+            nd = d + w
+            if nd < dist.get(nb, float('inf')):
+                dist[nb] = nd
+                parent[nb] = v
+                heapq.heappush(pq, (nd, nb))
+    if goal not in parent:
+        return None
+    path = []
+    cur = goal
+    while cur is not None:
+        path.append(cur)
+        cur = parent.get(cur)
+    path.reverse()
+    return path
 
-                for nb, w, _ in self.graph.edges[node]:
-                    nd = d + w
-                    if nd < dist[nb]:
-                        dist[nb] = nd
-                        prev[nb] = node
-                        heapq.heappush(pq, (nd, nb))
-            return self._error('Dijkstra', 'Зам олдсонгүй')
-        except Exception as e:
-            return self._error('Dijkstra', f'Алдаа: {str(e)}')
-
-    def dfs(self, start, end):
-        try:
-            s = self.find_nearest_node(*start)
-            e = self.find_nearest_node(*end)
-
-            if s is None or e is None:
-                return self._error('DFS', 'Эхлэх эсвэл төгсгөлийн цэг олдсонгүй')
-
-            visited = set()
-            stack = [(s, [s])]
-            t0, mem0 = time.time(), psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
-
-            while stack:
-                node, path = stack.pop()
-                if node == e:
-                    coords = [self.graph.nodes[n] for n in path]
-                    return self._result('DFS', coords, time.time() - t0, mem0)
-
-                if node not in visited:
-                    visited.add(node)
-                    for nb, _, _ in self.graph.edges[node]:
-                        if nb not in visited:
-                            stack.append((nb, path + [nb]))
-
-            return self._error('DFS', 'Зам олдсонгүй')
-        except Exception as e:
-            return self._error('DFS', f'Алдаа: {str(e)}')
-
-    def _result(self, algo, path, t, mem0):
-        mem1 = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
-        dist = sum(calculate_distance(path[i], path[i + 1]) for i in range(len(path) - 1))
-        return {
-            'algorithm': algo,
-            'path': path,
-            'distance': dist,
-            'execution_time': t,
-            'memory_used': mem1 - mem0,
-            'status': 'success'
-        }
-
-    def _error(self, algo, message='Зам олдсонгүй'):
-        return {
-            'algorithm': algo,
-            'error': message,
-            'status': 'error'
-        }
-
-
-shapefile_path = "data/gis_osm_roads_free_1.shp"
-if not os.path.exists(shapefile_path):
-    print(f"Анхаар: {shapefile_path} файл олдсонгүй. Жишээ өгөгдөл ашиглаж байна.")
-
-analyzer = RoadNetworkAnalyzer(shapefile_path)
-
+def path_latlon_list(path):
+    return [ (p[1], p[0]) for p in path ]
 
 @app.route("/")
 def index():
+    threading.Thread(target=build_graph_once, daemon=True).start()
     return render_template("index.html")
 
+@app.route("/find_json", methods=["POST"])
+def find_json():
+    data = request.get_json()
+    start_lon = float(data["start_lon"])
+    start_lat = float(data["start_lat"])
+    goal_lon = float(data["goal_lon"])
+    goal_lat = float(data["goal_lat"])
+    alg = data.get("algorithm", "all")
 
-@app.route("/api/bfs", methods=["POST"])
-def bfs_api():
-    try:
-        data = request.get_json()
-        if not data or 'start' not in data or 'end' not in data:
-            return jsonify({'error': 'Эхлэх болон төгсгөлийн цэг шаардлагатай'}), 400
-        res = analyzer.bfs(data["start"], data["end"])
-        return jsonify(res)
-    except Exception as e:
-        return jsonify({'error': f'Алдаа: {str(e)}'}), 500
+    build_graph_once()
 
+    start_node = nearest_node((start_lon, start_lat))
+    goal_node = nearest_node((goal_lon, goal_lat))
 
-@app.route("/api/dijkstra", methods=["POST"])
-def dijkstra_api():
-    try:
-        data = request.get_json()
-        if not data or 'start' not in data or 'end' not in data:
-            return jsonify({'error': 'Эхлэх болон төгсгөлийн цэг шаардлагатай'}), 400
-        res = analyzer.dijkstra(data["start"], data["end"])
-        return jsonify(res)
-    except Exception as e:
-        return jsonify({'error': f'Алдаа: {str(e)}'}), 500
+    results = {}
+    if alg in ("bfs", "all"):
+        p = bfs(start_node, goal_node)
+        results["bfs"] = path_latlon_list(p) if p else None
+    if alg in ("dfs", "all"):
+        p = dfs(start_node, goal_node)
+        results["dfs"] = path_latlon_list(p) if p else None
+    if alg in ("dijkstra", "all"):
+        p = dijkstra(start_node, goal_node)
+        results["dijkstra"] = path_latlon_list(p) if p else None
 
-
-@app.route("/api/dfs", methods=["POST"])
-def dfs_api():
-    try:
-        data = request.get_json()
-        if not data or 'start' not in data or 'end' not in data:
-            return jsonify({'error': 'Эхлэх болон төгсгөлийн цэг шаардлагатай'}), 400
-        res = analyzer.dfs(data["start"], data["end"])
-        return jsonify(res)
-    except Exception as e:
-        return jsonify({'error': f'Алдаа: {str(e)}'}), 500
-
-
-@app.route("/api/info")
-def info():
     return jsonify({
-        "nodes": len(analyzer.graph.nodes),
-        "edges": sum(len(v) for v in analyzer.graph.edges.values()),
-        "status": "active"
+        "start": [start_lat, start_lon],
+        "goal": [goal_lat, goal_lon],
+        "paths": results
     })
 
-
 if __name__ == "__main__":
-    template_dir = os.path.join(os.path.dirname(__file__), 'templates')
-    if not os.path.exists(template_dir):
-        os.makedirs(template_dir)
-        print("Templates хавтас үүсгэгдлээ")
-
-    app.run(debug=True, port=5000)
+    print("Starting app, building graph (this may take ~10-60s depending on shapefile size)...")
+    build_graph_once()
+    app.run(debug=True)

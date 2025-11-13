@@ -1,133 +1,97 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <meta charset="utf-8">
-  <title>Улаанбаатар хотын замын граф</title>
-  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css">
-  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <meta charset="utf-8" />
+  <title>UB Route Finder — Interactive</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <style>
-    #map { height: 100vh; width: 100vw; }
-    #controls {
-      position: absolute;
-      top: 10px; left: 10px;
-      background: white;
-      padding: 10px;
-      border-radius: 8px;
-      box-shadow: 0 0 10px rgba(0,0,0,0.2);
-      font-family: sans-serif;
-      z-index: 1000;
-    }
-    button { margin-top: 5px; width: 100%; }
+    body { font-family: Arial, sans-serif; padding: 12px; }
+    #map { height: 640px; width: 100%; border: 1px solid #ccc; }
+    .controls { margin: 8px 0; }
   </style>
 </head>
 <body>
-  <div id="controls">
-    <h3>Зам хайх</h3>
+  <h2>UB Route Finder — Click start and goal on map</h2>
+  <div class="controls">
+    <label for="algorithm">Algorithm:</label>
     <select id="algorithm">
-      <option value="bfs">BFS</option>
-      <option value="dfs">DFS</option>
-      <option value="dijkstra">Dijkstra</option>
+      <option value="all">All (BFS, DFS, Dijkstra)</option>
+      <option value="bfs">BFS (shortest by edges)</option>
+      <option value="dfs">DFS (one path)</option>
+      <option value="dijkstra">Dijkstra (shortest by length)</option>
     </select>
-    <button id="findPathBtn">Зам олох</button>
-    <button id="compareBtn">3 алгоритмыг харьцуулах</button>
+    <button id="clearBtn">Clear Markers</button>
   </div>
 
   <div id="map"></div>
 
   <script>
-    const map = L.map('map').setView([47.9214, 106.9055], 13);
+    const map = L.map('map').setView([47.9189, 106.917], 12);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 19,
-      attribution: '© OpenStreetMap'
+      maxZoom: 19, attribution: '© OpenStreetMap'
     }).addTo(map);
 
-    let startMarker = null;
-    let endMarker = null;
-    let pathLayers = [];
+    let startMarker = null, goalMarker = null;
+    let polyLayers = [];
 
-    const blueIcon = new L.Icon({
-      iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-blue.png',
-      shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png',
-      iconSize: [25, 41],
-      iconAnchor: [12, 41],
-      popupAnchor: [1, -34],
-      shadowSize: [41, 41]
+    function clearPolylines(){
+      polyLayers.forEach(l => map.removeLayer(l));
+      polyLayers = [];
+    }
+
+    document.getElementById('clearBtn').addEventListener('click', () => {
+      if (startMarker) map.removeLayer(startMarker);
+      if (goalMarker) map.removeLayer(goalMarker);
+      startMarker = goalMarker = null;
+      clearPolylines();
     });
 
-    const redIcon = new L.Icon({
-      iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png',
-      shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png',
-      iconSize: [25, 41],
-      iconAnchor: [12, 41],
-      popupAnchor: [1, -34],
-      shadowSize: [41, 41]
-    });
-
-    map.on('click', function(e) {
+    map.on('click', function(e){
       if (!startMarker) {
-        startMarker = L.marker(e.latlng, {icon: blueIcon}).addTo(map).bindPopup("Эхлэх цэг").openPopup();
-      } else if (!endMarker) {
-        endMarker = L.marker(e.latlng, {icon: redIcon}).addTo(map).bindPopup("Дуусах цэг").openPopup();
-      } else {
-        map.removeLayer(startMarker);
-        map.removeLayer(endMarker);
-        pathLayers.forEach(pl => map.removeLayer(pl));
-        pathLayers = [];
-        startMarker = L.marker(e.latlng, {icon: blueIcon}).addTo(map).bindPopup("Эхлэх цэг").openPopup();
-        endMarker = null;
-      }
-    });
-
-    document.getElementById('findPathBtn').addEventListener('click', async function() {
-      if (!startMarker || !endMarker) {
-        alert("Эхлэх ба дуусах цэгээ сонгоно уу!");
+        startMarker = L.marker(e.latlng, {title:'Start', icon: L.icon({iconUrl: 'https://maps.google.com/mapfiles/ms/icons/green-dot.png'})}).addTo(map);
         return;
       }
-
-      const algorithm = document.getElementById('algorithm').value;
-      const start = [startMarker.getLatLng().lat, startMarker.getLatLng().lng];
-      const end = [endMarker.getLatLng().lat, endMarker.getLatLng().lng];
-
-      const res = await fetch(`/api/find_path?start=${start}&end=${end}&algorithm=${algorithm}`);
-      const data = await res.json();
-
-      if (data.error) {
-        alert(data.error);
+      if (!goalMarker) {
+        goalMarker = L.marker(e.latlng, {title:'Goal', icon: L.icon({iconUrl: 'https://maps.google.com/mapfiles/ms/icons/red-dot.png'})}).addTo(map);
+        // got both -> call server
+        const alg = document.getElementById('algorithm').value;
+        fetch('/find_json', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({
+            start_lon: startMarker.getLatLng().lng,
+            start_lat: startMarker.getLatLng().lat,
+            goal_lon: goalMarker.getLatLng().lng,
+            goal_lat: goalMarker.getLatLng().lat,
+            algorithm: alg
+          })
+        }).then(r => r.json()).then(data => {
+          clearPolylines();
+          const paths = data.paths;
+          if (paths.bfs) {
+            const p = L.polyline(paths.bfs, {color:'blue', weight:4}).addTo(map);
+            polyLayers.push(p);
+          }
+          if (paths.dfs) {
+            const p = L.polyline(paths.dfs, {color:'orange', weight:4, dashArray:'6 6'}).addTo(map);
+            polyLayers.push(p);
+          }
+          if (paths.dijkstra) {
+            const p = L.polyline(paths.dijkstra, {color:'purple', weight:4}).addTo(map);
+            polyLayers.push(p);
+          }
+        }).catch(err=>{
+          alert("Error: " + err);
+        });
         return;
       }
-
-      pathLayers.forEach(pl => map.removeLayer(pl));
-      pathLayers = [];
-
-      const coords = data.path.map(p => [p[0], p[1]]);
-      const color = algorithm === 'bfs' ? 'green' : algorithm === 'dfs' ? 'red' : 'magenta';
-      const polyline = L.polyline(coords, {color: color, weight: 6, opacity: 0.8}).addTo(map);
-      pathLayers.push(polyline);
-      map.fitBounds(polyline.getBounds());
-    });
-
-    document.getElementById('compareBtn').addEventListener('click', async function() {
-      if (!startMarker || !endMarker) {
-        alert("Эхлэх ба дуусах цэгээ сонгоно уу!");
-        return;
-      }
-
-      const start = [startMarker.getLatLng().lat, startMarker.getLatLng().lng];
-      const end = [endMarker.getLatLng().lat, endMarker.getLatLng().lng];
-
-      const res = await fetch(`/api/compare_algorithms?start=${start}&end=${end}`);
-      const data = await res.json();
-
-      pathLayers.forEach(pl => map.removeLayer(pl));
-      pathLayers = [];
-
-      for (const algo in data) {
-        if (data[algo].path) {
-          const coords = data[algo].path.map(p => [p[0], p[1]]);
-          const color = algo === 'bfs' ? 'green' : algo === 'dfs' ? 'red' : 'magenta';
-          const polyline = L.polyline(coords, {color: color, weight: 5, opacity: 0.7}).addTo(map);
-          pathLayers.push(polyline);
-        }
+      // if both exist, clicking again resets
+      if (startMarker && goalMarker){
+        map.removeLayer(startMarker); map.removeLayer(goalMarker);
+        clearPolylines();
+        startMarker = L.marker(e.latlng, {title:'Start', icon: L.icon({iconUrl: 'https://maps.google.com/mapfiles/ms/icons/green-dot.png'})}).addTo(map);
+        goalMarker = null;
       }
     });
   </script>
