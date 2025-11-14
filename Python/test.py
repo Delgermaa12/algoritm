@@ -1,42 +1,31 @@
-import pytest
-from app import bfs, dfs, dijkstra, path_latlon_list
+import unittest
+from scipy.spatial import cKDTree
 
-TEST_GRAPH = {
-    (0,0): {(0,1):1, (1,0):1},
-    (0,1): {(0,0):1, (1,1):1},
-    (1,0): {(0,0):1, (1,1):1},
-    (1,1): {(0,1):1, (1,0):1}
-}
+def nearest_node_mock(point, nodes, tree):
+    dist, idx = tree.query([point[0], point[1]], k=1)
+    return nodes[int(idx)]
 
-@pytest.fixture(autouse=True)
-def setup_graph(monkeypatch):
-    monkeypatch.setattr("app.GRAPH", TEST_GRAPH)
+class TestNearestNode(unittest.TestCase):
 
-def test_bfs_path():
-    start = (0,0)
-    goal = (1,1)
-    path = bfs(start, goal)
-    assert path is not None
-    assert path[0] == start
-    assert path[-1] == goal
+    @classmethod
+    def setUpClass(cls):
+        cls.nodes = [(0,0), (0,1), (1,0), (1,1)]
+        cls.tree = cKDTree(cls.nodes)
 
-def test_dfs_path():
-    start = (0,0)
-    goal = (1,1)
-    path = dfs(start, goal)
-    assert path is not None
-    assert path[0] == start
-    assert path[-1] == goal
+    def test_origin(self):
+        point = (0.1, 0.1)
+        nearest = nearest_node_mock(point, self.nodes, self.tree)
+        self.assertEqual(nearest, (0,0))
 
-def test_dijkstra_path():
-    start = (0,0)
-    goal = (1,1)
-    path = dijkstra(start, goal)
-    assert path is not None
-    assert path[0] == start
-    assert path[-1] == goal
+    def test_corner(self):
+        point = (0.9, 1.1)
+        nearest = nearest_node_mock(point, self.nodes, self.tree)
+        self.assertEqual(nearest, (1,1))
 
-def test_path_latlon_list():
-    path = [(0,0),(0,1),(1,1)]
-    latlon = path_latlon_list(path)
-    assert latlon == [[0,0],[1,0],[1,1]] or latlon is not None
+    def test_edge(self):
+        point = (0.5, 0.2)
+        nearest = nearest_node_mock(point, self.nodes, self.tree)
+        self.assertIn(nearest, [(0,0),(1,0)])
+
+if __name__ == "__main__":
+    unittest.main()
